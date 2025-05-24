@@ -5,7 +5,7 @@
 
 import copy
 import os
-
+import csv
 import torch
 from absl import app, flags
 from torchdyn.core import NeuralODE
@@ -135,6 +135,10 @@ def train(argv):
         raise NotImplementedError(
             f"Unknown model {FLAGS.model}, must be one of ['otcfm', 'icfm', 'fm', 'si']"
         )
+    loss_history = []
+    savedir = FLAGS.output_dir + FLAGS.model + "/"
+    os.makedirs(savedir, exist_ok=True)
+    loss_file = os.path.join(savedir, "loss_history.csv")
     start_step = 0
     if FLAGS.resume_from_checkpoint:
         if os.path.exists(FLAGS.resume_from_checkpoint):
@@ -149,12 +153,19 @@ def train(argv):
             optim.load_state_dict(checkpoint["optim"])
             sched.load_state_dict(checkpoint["sched"])
             start_step = checkpoint["step"]
+            # Load loss history if exists
+            if os.path.exists(loss_file):
+                with open(loss_file, "r") as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    for row in reader:
+                        loss_history.append({"step": int(row[0]), "loss": float(row[1])})
             print(f"Đã load checkpoint tại bước {start_step}")
         else:
             print(f"Không tìm thấy checkpoint {FLAGS.resume_from_checkpoint}. Bắt đầu từ đầu.")
-    savedir = FLAGS.output_dir + FLAGS.model + "/"
-    os.makedirs(savedir, exist_ok=True)
-
+    with open(loss_file, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["step", "loss"])
     with trange(start_step, FLAGS.total_steps, dynamic_ncols=True, initial=start_step, total=FLAGS.total_steps) as pbar:
         for step in pbar:
             optim.zero_grad()
@@ -168,7 +179,15 @@ def train(argv):
             optim.step()
             sched.step()
             ema(net_model, ema_model, FLAGS.ema_decay)  # new
+            # Save loss
+            loss_value = loss.item()
+            loss_history.append({"step": step, "loss": loss_value})
+            with open(loss_file, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([step, loss_value])
 
+            # Update progress bar with loss
+            pbar.set_postfix(loss=loss_value)
             # sample and Saving the weights
             if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
                 generate_samples(net_model, FLAGS.parallel, savedir, step, net_="normal")
